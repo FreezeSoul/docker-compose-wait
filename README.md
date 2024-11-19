@@ -1,11 +1,9 @@
 # docker-compose-wait
 
-[![Build Status](https://travis-ci.org/ufoscout/docker-compose-wait.svg?branch=master)](https://travis-ci.org/ufoscout/docker-compose-wait)
+![Build Status](https://github.com/ufoscout/docker-compose-wait/actions/workflows/build_and_test.yml/badge.svg)
 [![codecov](https://codecov.io/gh/ufoscout/docker-compose-wait/branch/master/graph/badge.svg)](https://codecov.io/gh/ufoscout/docker-compose-wait)
-[![Codacy Badge](https://api.codacy.com/project/badge/Grade/e9c2359ba5534f58a4b178191acb836a)](https://www.codacy.com/manual/edumco/docker-compose-wait?utm_source=github.com&utm_medium=referral&utm_content=edumco/docker-compose-wait&utm_campaign=Badge_Grade)
-[![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fedumco%2Fdocker-compose-wait.svg?type=shield)](https://app.fossa.io/projects/git%2Bgithub.com%2Fedumco%2Fdocker-compose-wait?ref=badge_shield)
 
-A small command-line utility to wait for other docker images to be started while using docker-compose.
+A small command-line utility to wait for other docker images to be started while using docker-compose (or Kubernetes or docker stack or whatever).
 
 It permits waiting for:
 - a fixed amount of seconds
@@ -23,8 +21,11 @@ For example, your application "MySuperApp" uses MongoDB, Postgres and MySql (wow
 FROM alpine
 
 ## Add the wait script to the image
-ADD https://github.com/ufoscout/docker-compose-wait/releases/download/2.9.0/wait /wait
-RUN chmod +x /wait
+COPY --from=ghcr.io/ufoscout/docker-compose-wait:latest /wait /wait
+
+## Otherwise you can directly download the executable from github releases. E.g.:
+#  ADD https://github.com/ufoscout/docker-compose-wait/releases/download/2.11.0/wait /wait
+#  RUN chmod +x /wait
 
 ## Add your application to the docker image
 ADD MySuperApp.sh /MySuperApp.sh
@@ -77,9 +78,27 @@ command: sh -c "/wait && /MySuperApp.sh"
 
 This is discussed further [here](https://stackoverflow.com/questions/30063907/using-docker-compose-how-to-execute-multiple-commands) and [here](https://github.com/docker/compose/issues/2033).
 
-Do note the recommended way of using `wait` is with the shell operator `&&`, which implies the requirement of a shell. This introduces a requirement for Docker use where bases images like [scratch](https://hub.docker.com/_/scratch) not offering a shell cannot be used.
+## Usage in images that do not have a shell
 
-Instead the recommendation for base Docker images are ones offering a shell like [alpine](https://hub.docker.com/_/alpine), [debian](https://hub.docker.com/_/debian) etc. and if you want to aim for _minimalism_, evaluate something like: [busybox](https://hub.docker.com/_/busybox)
+When using [distroless](https://github.com/GoogleContainerTools/distroless) or building images [`FROM scratch`](https://docs.docker.com/develop/develop-images/baseimages/#create-a-simple-parent-image-using-scratch), it is common to not have `sh` available. In this case, it is necessary to [specify the command for wait to run explicitly](#additional-configuration-options). The invoked command will be invoked with any arguments configured for it and will completely replace the `wait` process in your container via a syscall to [`exec`](https://man7.org/linux/man-pages/man3/exec.3.html). Because there is no shell to expand arguments in this case, `wait` must be the `ENTRYPOINT` for the container and has to be specified in [the exec form](https://docs.docker.com/engine/reference/builder/#exec-form-entrypoint-example). Note that because there is no shell to perform expansion, arguments like `*` must be interpreted by the program that receives them.
+
+```dockerfile
+FROM golang
+
+COPY myApp /app
+WORKDIR /app
+RUN go build -o /myApp -ldflags '-s -w -extldflags -static' ./...
+
+## ----------------
+
+FROM scratch
+
+COPY --from=ghcr.io/ufoscout/docker-compose-wait:latest /wait /wait
+
+COPY --from=0 /myApp /myApp
+ENV WAIT_COMMAND="/myApp arg1 argN..."
+ENTRYPOINT ["/wait"]
+```
 
 ## Additional configuration options
 
@@ -88,22 +107,43 @@ The behaviour of the wait utility can be configured with the following environme
 - _WAIT_LOGGER_LEVEL_ : the output logger level. Valid values are: _debug_, _info_, _error_, _off_. the default is _debug_. 
 - _WAIT_HOSTS_: comma-separated list of pairs host:port for which you want to wait.
 - _WAIT_PATHS_: comma-separated list of paths (i.e. files or directories) on the local filesystem for which you want to wait until they exist.
+- _WAIT_COMMAND_: command and arguments to run once waiting completes. The invoked command will completely replace the `wait` process. The default is none.
 - _WAIT_TIMEOUT_: max number of seconds to wait for all the hosts/paths to be available before failure. The default is 30 seconds.
 - _WAIT_HOST_CONNECT_TIMEOUT_: The timeout of a single TCP connection to a remote host before attempting a new connection. The default is 5 seconds.
 - _WAIT_BEFORE_: number of seconds to wait (sleep) before start checking for the hosts/paths availability
 - _WAIT_AFTER_: number of seconds to wait (sleep) once all the hosts/paths are available
 - _WAIT_SLEEP_INTERVAL_: number of seconds to sleep between retries. The default is 1 second.
 
-## Using on non-linux systems
+
+## Supported architectures
+
+From release 2.11.0, the following executables are available for download:
+- _wait_: This is the executable intended for Linux x64 systems
+- *wait_x86_64*: This is the very same executable than _wait_
+- *wait_aarch64*: This is the executable to be used for aarch64 architectures
+- *wait_arm7*: This is the executable to be used for arm7 architectures
+
+All executables are built with [MUSL](https://www.musl-libc.org/) for maximum portability.
+
+To use any of these executables, simply replace the executable name in the download link:
+https://github.com/ufoscout/docker-compose-wait/releases/download/{{VERSION}}/{{executable_name}}
+
+
+## Docker images
+
+Official docker images based on `scratch` can be found here:
+https://github.com/users/ufoscout/packages/container/package/docker-compose-wait
+
+
+## Using on other systems
 
 The simplest way of getting the _wait_ executable is to download it from
 
 [https://github.com/ufoscout/docker-compose-wait/releases/download/{{VERSION}}/wait](https://github.com/ufoscout/docker-compose-wait/releases/download/{{VERSION}}/wait)
 
-This is a pre-built executable for Linux x64 systems which are the default ones in Docker.
-In addition, it is built with [MUSL](https://www.musl-libc.org/) for maximum portability.
+or to use one of the pre-built docker images.
 
-If you need it for a different architecture, you should clone this repository and build it for your target.
+If you need it for an architecture for which a pre-built file is not available, you should clone this repository and build it for your target.
 
 As it has no external dependencies, an being written in the mighty [rust](https://www.rust-lang.org)
 programming language, the build process is just a simple `cargo build --release`
@@ -127,7 +167,3 @@ Use your shiny new executable on your raspberry device!
 ## Notes
 
 This utility was explicitly written to be used with docker-compose; however, it can be used everywhere since it has no dependencies on docker.
-
-
-## License
-[![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fedumco%2Fdocker-compose-wait.svg?type=large)](https://app.fossa.io/projects/git%2Bgithub.com%2Fedumco%2Fdocker-compose-wait?ref=badge_large)

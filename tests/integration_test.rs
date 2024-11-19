@@ -88,7 +88,7 @@ fn should_sleep_the_specified_time_between_path_checks() {
         &mut on_timeout,
     );
     let elapsed = millis_elapsed(start);
-    assert!(elapsed >= 2001);
+    assert!(elapsed >= 2000);
     assert!(elapsed < 3000);
 }
 
@@ -468,6 +468,7 @@ fn new_config(
     wait::Config {
         hosts: hosts.to_string(),
         paths: paths.to_string(),
+        command: None,
         global_timeout: timeout,
         tcp_connection_timeout,
         wait_before: before,

@@ -1,14 +1,21 @@
-use crate::env_reader::env_var_exists;
+use env_reader::env_var_exists;
 use log::*;
+use std::option::Option;
 use std::path::Path;
 use std::time::Duration;
 
 pub mod env_reader;
 pub mod sleeper;
 
+pub struct Command {
+    pub program: String,
+    pub argv: Vec<String>,
+}
+
 pub struct Config {
     pub hosts: String,
     pub paths: String,
+    pub command: Option<(Command, String)>,
     pub global_timeout: u64,
     pub tcp_connection_timeout: u64,
     pub wait_before: u64,
@@ -18,11 +25,7 @@ pub struct Config {
 
 const LINE_SEPARATOR: &str = "--------------------------------------------------------";
 
-pub fn wait(
-    sleep: &mut dyn crate::sleeper::Sleeper,
-    config: &Config,
-    on_timeout: &mut dyn FnMut(),
-) {
+pub fn wait(sleep: &mut dyn sleeper::Sleeper, config: &Config, on_timeout: &mut dyn FnMut()) {
     info!("{}", LINE_SEPARATOR);
     info!(" docker-compose-wait {}", env!("CARGO_PKG_VERSION"));
     info!("---------------------------");
@@ -37,6 +40,11 @@ pub fn wait(
         " - TCP connection timeout before retry: {} seconds ",
         config.tcp_connection_timeout
     );
+
+    if let Some((_, command_string)) = &config.command {
+        debug!(" - Command to run once ready: {}", command_string);
+    }
+
     debug!(
         " - Sleeping time before checking for hosts/paths availability: {} seconds",
         config.wait_before
@@ -66,7 +74,7 @@ pub fn wait(
         for host in config.hosts.trim().split(',') {
             info!("Checking availability of host [{}]", host);
             while !port_check::is_port_reachable_with_timeout(
-                &host.trim().to_string(),
+                host.trim(),
                 Duration::from_secs(config.tcp_connection_timeout),
             ) {
                 info!("Host [{}] not yet available...", host);
@@ -116,21 +124,48 @@ pub fn wait(
 
     info!("docker-compose-wait - Everything's fine, the application can now start!");
     info!("{}", LINE_SEPARATOR);
+
+    if let Some((command, _)) = &config.command {
+        let err = exec::Command::new(&command.program)
+            .args(&command.argv)
+            .exec();
+        panic!("{}", err);
+    }
+}
+
+pub fn parse_command<S: Into<String>>(
+    raw_cmd: S,
+) -> Result<Option<(Command, String)>, shell_words::ParseError> {
+    let s = raw_cmd.into();
+    let command_string = s.trim().to_string();
+    if command_string.is_empty() {
+        return Ok(None);
+    }
+    let mut argv = shell_words::split(&command_string)?;
+    Ok(Some((
+        Command {
+            program: argv.remove(0),
+            argv,
+        },
+        command_string,
+    )))
 }
 
 pub fn config_from_env() -> Config {
     Config {
-        hosts: crate::env_reader::env_var("WAIT_HOSTS", "".to_string()),
-        paths: crate::env_reader::env_var("WAIT_PATHS", "".to_string()),
+        hosts: env_reader::env_var("WAIT_HOSTS", "".to_string()),
+        paths: env_reader::env_var("WAIT_PATHS", "".to_string()),
+        command: parse_command(env_reader::env_var("WAIT_COMMAND", "".to_string()))
+            .expect("failed to parse command value from environment"),
         global_timeout: to_int(&legacy_or_new("WAIT_HOSTS_TIMEOUT", "WAIT_TIMEOUT", ""), 30),
         tcp_connection_timeout: to_int(
-            &crate::env_reader::env_var("WAIT_HOST_CONNECT_TIMEOUT", "".to_string()),
+            &env_reader::env_var("WAIT_HOST_CONNECT_TIMEOUT", "".to_string()),
             5,
         ),
         wait_before: to_int(&legacy_or_new("WAIT_BEFORE_HOSTS", "WAIT_BEFORE", ""), 0),
         wait_after: to_int(&legacy_or_new("WAIT_AFTER_HOSTS", "WAIT_AFTER", ""), 0),
         wait_sleep_interval: to_int(
-            &crate::env_reader::env_var("WAIT_SLEEP_INTERVAL", "".to_string()),
+            &env_reader::env_var("WAIT_SLEEP_INTERVAL", "".to_string()),
             1,
         ),
     }
@@ -143,9 +178,9 @@ fn legacy_or_new(legacy_var_name: &str, var_name: &str, default: &str) -> String
             "Environment variable [{}] is deprecated. Use [{}] instead.",
             legacy_var_name, var_name
         );
-        temp_value = crate::env_reader::env_var(legacy_var_name, temp_value);
+        temp_value = env_reader::env_var(legacy_var_name, temp_value);
     }
-    temp_value = crate::env_reader::env_var(var_name, temp_value);
+    temp_value = env_reader::env_var(var_name, temp_value);
     temp_value
 }
 
@@ -158,7 +193,6 @@ fn to_int(number: &str, default: u64) -> u64 {
 
 #[cfg(test)]
 mod test {
-
     use super::*;
     use lazy_static::*;
     use std::env;
@@ -195,7 +229,7 @@ mod test {
     #[test]
     fn config_should_use_default_values() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        set_env("", "", "10o", "10", "", "abc");
+        set_env("", "", "10o", "10", "", "abc", "");
         let config = config_from_env();
         assert_eq!("".to_string(), config.hosts);
         assert_eq!(30, config.global_timeout);
@@ -207,7 +241,7 @@ mod test {
     #[test]
     fn should_get_config_values_from_env() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        set_env("localhost:1234", "20", "2", "3", "4", "23");
+        set_env("localhost:1234", "20", "2", "3", "4", "23", "");
         let config = config_from_env();
         assert_eq!("localhost:1234".to_string(), config.hosts);
         assert_eq!(20, config.global_timeout);
@@ -220,7 +254,7 @@ mod test {
     #[test]
     fn should_get_default_config_values() {
         let _guard = TEST_MUTEX.lock().unwrap();
-        set_env("localhost:1234", "", "", "", "", "");
+        set_env("localhost:1234", "", "", "", "", "", "");
         let config = config_from_env();
         assert_eq!("localhost:1234".to_string(), config.hosts);
         assert_eq!(30, config.global_timeout);
@@ -230,6 +264,14 @@ mod test {
         assert_eq!(1, config.wait_sleep_interval);
     }
 
+    #[test]
+    #[should_panic]
+    fn should_panic_when_given_an_invalid_command() {
+        let _guard = TEST_MUTEX.lock().unwrap();
+        set_env("", "", "", "", "", "", "a 'b");
+        config_from_env();
+    }
+
     fn set_env(
         hosts: &str,
         timeout: &str,
@@ -237,12 +279,64 @@ mod test {
         after: &str,
         sleep: &str,
         tcp_timeout: &str,
+        command: &str,
     ) {
-        env::set_var("WAIT_BEFORE_HOSTS", before.to_string());
-        env::set_var("WAIT_AFTER_HOSTS", after.to_string());
-        env::set_var("WAIT_HOSTS_TIMEOUT", timeout.to_string());
-        env::set_var("WAIT_HOST_CONNECT_TIMEOUT", tcp_timeout.to_string());
-        env::set_var("WAIT_HOSTS", hosts.to_string());
-        env::set_var("WAIT_SLEEP_INTERVAL", sleep.to_string());
+        env::set_var("WAIT_BEFORE_HOSTS", before);
+        env::set_var("WAIT_AFTER_HOSTS", after);
+        env::set_var("WAIT_HOSTS_TIMEOUT", timeout);
+        env::set_var("WAIT_HOST_CONNECT_TIMEOUT", tcp_timeout);
+        env::set_var("WAIT_HOSTS", hosts);
+        env::set_var("WAIT_SLEEP_INTERVAL", sleep);
+        env::set_var("WAIT_COMMAND", command);
+    }
+
+    #[test]
+    fn parse_command_fails_when_command_is_invalid() {
+        assert!(parse_command(" intentionally 'invalid").is_err())
+    }
+
+    #[test]
+    fn parse_command_returns_none_when_command_is_empty() {
+        for c in &["", " \t\n\r\n"] {
+            let p = parse_command(c.to_string()).unwrap();
+            assert!(p.is_none());
+        }
+    }
+
+    #[test]
+    fn parse_command_handles_commands_without_args() {
+        let (command, command_string) = parse_command("ls".to_string()).unwrap().unwrap();
+        assert_eq!("ls", command_string);
+        assert_eq!("ls", command.program);
+        assert_eq!(Vec::<String>::new(), command.argv);
+    }
+
+    #[test]
+    fn parse_command_handles_commands_with_args() {
+        let (command, command_string) = parse_command("ls -al".to_string()).unwrap().unwrap();
+        assert_eq!("ls -al", command_string);
+        assert_eq!("ls", command.program);
+        assert_eq!(vec!["-al"], command.argv);
+    }
+
+    #[test]
+    fn parse_command_discards_leading_and_trailing_whitespace() {
+        let (command, command_string) = parse_command("     hello world    ".to_string())
+            .unwrap()
+            .unwrap();
+        assert_eq!("hello world", command_string);
+        assert_eq!("hello", command.program);
+        assert_eq!(vec!["world"], command.argv);
+    }
+
+    #[test]
+    fn parse_command_strips_shell_quotes() {
+        let (command, command_string) =
+            parse_command(" find . -type \"f\" -name '*.rs' ".to_string())
+                .unwrap()
+                .unwrap();
+        assert_eq!("find . -type \"f\" -name '*.rs'", command_string);
+        assert_eq!("find", command.program);
+        assert_eq!(vec![".", "-type", "f", "-name", "*.rs"], command.argv);
     }
 }
